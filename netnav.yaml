@@ -1,0 +1,145 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: "NetNav Amazon EC2 Linux instance."
+
+Parameters:
+  Name:
+    Description: NetNav name.
+    Type: String
+    AllowedPattern: (?=^.{3,63}$)(^[a-z0-9]+[a-z0-9\\-]+[a-z0-9]+$)
+
+  Bucket:
+    Description: S3 bucket name containing NetNav script. Folders are supported, but don't leave a trailing "/"
+    Type: String 
+
+  Vpc:
+    Description: NetNav security group VPC.
+    Type: AWS::EC2::VPC::Id
+
+  Subnet:
+    Description: NetNav deployment subnet.
+    Type: AWS::EC2::Subnet::Id
+
+  PublicIp:
+    Description: NetNav auto-assign public IP.
+    Type: String
+    AllowedValues:
+      - true
+      - false
+
+  # https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-public-parameters-ami.html
+  AmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-arm64-gp2'
+
+Resources:
+  
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-iam-role.html
+  IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      RoleName: !Sub "${Name}-NetNav"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: S3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource: !Sub "arn:aws:s3:::${Bucket}/*"
+
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-iam-instanceprofile.html
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile 
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref IamRole
+
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-securitygroup.html
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${Name}-NetNav"
+      GroupName: !Sub "${Name}-NetNav"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - CidrIp: 10.0.0.0/8
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+        - CidrIp: 172.16.0.0/12
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+        - CidrIp: 192.168.0.0/16
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+        - CidrIp: 10.0.0.0/8
+          IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+        - CidrIp: 172.16.0.0/12
+          IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+        - CidrIp: 192.168.0.0/16
+          IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+      Tags:
+      - Key: Name
+        Value: !Sub "${Name}"
+
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-instance.html
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      BlockDeviceMappings:
+        -
+          DeviceName: /dev/sdh
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            Iops: 3000
+            VolumeSize: 10
+            VolumeType: gp3
+      IamInstanceProfile: !Ref InstanceProfile
+      ImageId: !Ref AmiId
+      InstanceType: t4g.nano
+      NetworkInterfaces:
+        -
+          AssociatePublicIpAddress: !Ref PublicIp
+          DeleteOnTermination: true
+          Description: !Sub "${Name}-NetNav-0"
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref SecurityGroup
+          SubnetId: !Ref Subnet
+      Tags:
+      - Key: Name
+        Value: !Sub "${Name}-NetNav"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum install -y awscli httpd
+          aws s3 cp s3://${Bucket}/netnav.py /home/ec2-user/netnav.py
+          python3 /home/ec2-user/netnav.py
+          systemctl start httpd
+          systemctl enable httpd
