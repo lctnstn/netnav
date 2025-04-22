@@ -9,10 +9,6 @@ Parameters:
     Type: String
     AllowedPattern: (?=^.{3,63}$)(^[a-z0-9]+[a-z0-9\\-]+[a-z0-9]+$)
 
-  Bucket:
-    Description: S3 bucket name containing NetNav script. Folders are supported, but don't leave a trailing "/"
-    Type: String 
-
   Vpc:
     Description: NetNav security group VPC.
     Type: AWS::EC2::VPC::Id
@@ -53,15 +49,6 @@ Resources:
       RoleName: !Sub "${Name}-NetNav"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-      Policies:
-        - PolicyName: S3
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action:
-                  - "s3:GetObject"
-                Resource: !Sub "arn:aws:s3:::${Bucket}/*"
 
   # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-iam-instanceprofile.html
   InstanceProfile:
@@ -139,7 +126,37 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           yum install -y awscli httpd
-          aws s3 cp s3://${Bucket}/netnav.py /home/ec2-user/netnav.py
+          
+          # Create the NetNav Python script directly in UserData
+          cat > /home/ec2-user/netnav.py << 'EOF'
+          import urllib.request
+          import json
+          
+          # Get IMDSv2 session token
+          token_req = urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT")
+          token_req.add_header("X-aws-ec2-metadata-token-ttl-seconds", 60)
+          with urllib.request.urlopen(token_req) as f:
+            token = f.read().decode()
+          
+          # Put interesting metadata into a dictionary
+          interesting_metadata = {}
+          for item_key in ["instance-id", "local-ipv4", "placement/region", "placement/availability-zone", "placement/availability-zone-id"]:
+            metadata_req = urllib.request.Request(f'http://169.254.169.254/latest/meta-data/{item_key}')
+            metadata_req.add_header("X-aws-ec2-metadata-token", token)
+            
+            with urllib.request.urlopen(metadata_req) as f:
+              item_value = f.read().decode()
+            
+            interesting_metadata[item_key] = item_value
+          
+          # Dump the dictionary to a file
+          with open("/var/www/html/index.html", "w") as f:
+            json.dump(interesting_metadata, f)
+          EOF
+          
+          # Run the script
           python3 /home/ec2-user/netnav.py
+          
+          # Start and enable the HTTP server
           systemctl start httpd
           systemctl enable httpd
